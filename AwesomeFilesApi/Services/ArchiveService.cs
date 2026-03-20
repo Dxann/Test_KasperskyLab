@@ -1,9 +1,13 @@
 using System.IO.Compression;
+using System.Security.Cryptography;
+using System.Text;
 
 public class ArchiveService : IArchiveService
 {
     private readonly string _filesPath;
     private readonly string _outputPath;
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _cacheLocks = new();
 
     public ArchiveService(IConfiguration config)
     {
@@ -29,21 +33,38 @@ public class ArchiveService : IArchiveService
             return;
         }
 
+        var cacheKey = ComputeCacheKey(task.Files);
+        var archivePath = Path.Combine(_outputPath, $"{cacheKey}.zip");
+
+        Directory.CreateDirectory(_outputPath);
+
+        var gate = _cacheLocks.GetOrAdd(cacheKey, _ => new SemaphoreSlim(1, 1));
+        var createdNew = false;
+
         try
         {
-            Directory.CreateDirectory(_outputPath);
-            var archivePath = Path.Combine(_outputPath, $"{task.Id}.zip");
-
-            await Task.Run(() =>
+            await gate.WaitAsync(cancellationToken);
+            try
             {
-                using var zip = ZipFile.Open(archivePath, ZipArchiveMode.Create);
-                foreach (var file in task.Files)
+                if (!File.Exists(archivePath))
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    var fullPath = Path.Combine(_filesPath, file);
-                    zip.CreateEntryFromFile(fullPath, file);
+                    createdNew = true;
+                    await Task.Run(() =>
+                    {
+                        using var zip = ZipFile.Open(archivePath, ZipArchiveMode.Create);
+                        foreach (var file in task.Files)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            var fullPath = Path.Combine(_filesPath, file);
+                            zip.CreateEntryFromFile(fullPath, file);
+                        }
+                    }, cancellationToken);
                 }
-            }, cancellationToken);
+            }
+            finally
+            {
+                gate.Release();
+            }
 
             task.ArchivePath = archivePath;
             task.Status = ArchiveStatus.Completed;
@@ -52,15 +73,29 @@ public class ArchiveService : IArchiveService
         {
             task.Status = ArchiveStatus.Failed;
             task.Error = "Архивирование отменено";
-            if (!string.IsNullOrWhiteSpace(task.ArchivePath) && File.Exists(task.ArchivePath))
-                File.Delete(task.ArchivePath);
+            if (createdNew && File.Exists(archivePath))
+                File.Delete(archivePath);
         }
         catch (Exception ex)
         {
             task.Status = ArchiveStatus.Failed;
             task.Error = ex.Message;
-            if (!string.IsNullOrWhiteSpace(task.ArchivePath) && File.Exists(task.ArchivePath))
-                File.Delete(task.ArchivePath);
+            if (createdNew && File.Exists(archivePath))
+                File.Delete(archivePath);
         }
+    }
+
+    private static string ComputeCacheKey(IEnumerable<string> files)
+    {
+        var normalized = files
+            .Select(f => (f ?? string.Empty).Trim())
+            .Where(f => !string.IsNullOrWhiteSpace(f))
+            .OrderBy(f => f, StringComparer.Ordinal)
+            .ToArray();
+
+        var input = string.Join("\n", normalized);
+        var bytes = Encoding.UTF8.GetBytes(input);
+        var hash = SHA256.HashData(bytes);
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 }

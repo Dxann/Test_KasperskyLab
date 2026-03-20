@@ -1,0 +1,13 @@
+services:
+  awesomefilesapi:
+    build: .
+    ports:
+      - "5073:8080"
+    environment:
+      AwesomeFiles__FilesPath: /data/files
+      AwesomeFiles__ArchivesPath: /data/archives
+      RequestLogging__SqlitePath: /data/logs/requests.db
+    volumes:
+      - ./Files:/data/files:ro
+      - ./Archives:/data/archives
+      - ./Logs:/data/logs
