@@ -1,0 +1,6 @@
+@AwesomeFilesApi_HostAddress = http://localhost:5073
+
+GET {{AwesomeFilesApi_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
